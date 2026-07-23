@@ -21,6 +21,9 @@ const username = process.env.GROWATT_USERNAME;
 const password = process.env.GROWATT_PASSWORD;
 const SLAVE_CAPACITY_AH = 100; // Sesuaikan kapasitas nominal slave lu
 
+// Ambil konfigurasi threshold inverter dari .env.local (default 0.4 A jika kosong)
+const INV_STANDBY_THRESHOLD = parseFloat(process.env.INV_STANDBY_THRESHOLD_AMP || 0.4);
+
 async function run() {
     try {
         if (!username || !password) {
@@ -97,9 +100,15 @@ async function run() {
                 slaveSoc = 100.0;
                 console.log("[CALIBRATION] Master SOC 100%. Slave SOC di-reset otomatis ke 100%.");
             } else {
-                // 1. Hitung Ah Counting dasar
+                // 1. Hitung Ah Counting dasar dengan Deadzone Filter Inverter Threshold
                 const deltaHours = deltaSeconds / 3600;
-                const deltaAh = slaveCurrent * deltaHours; 
+                
+                let effectiveSlaveCurrent = slaveCurrent;
+                if (Math.abs(slaveCurrent) <= INV_STANDBY_THRESHOLD) {
+                    effectiveSlaveCurrent = 0; // Abaikan arus kecil standby inverter
+                }
+
+                const deltaAh = effectiveSlaveCurrent * deltaHours; 
                 const deltaSocAh = (deltaAh / SLAVE_CAPACITY_AH) * 100;
                 let calculatedSlaveSoc = lastSlaveSoc + deltaSocAh;
 
@@ -114,9 +123,12 @@ async function run() {
                     console.log(`[MASTER GUIDED CONTROL] Master Delta: ${masterSocDelta}% | Koreksi diterapkan.`);
                 }
 
-                // [PENGAMAN MENTOK 100%]
-                // Jika slave sudah penuh dan arusnya masih positif (charging), kunci di 100%
-                if (lastSlaveSoc >= 100 && slaveCurrent > 0) {
+                // [STANDBY LOCK & CAP PROTECTION]
+                // Jika master/slave sudah penuh dan arusnya masih dalam batas standby threshold inverter, kunci di 100%
+                if ((masterSoc === 100 || lastSlaveSoc >= 100) && slaveCurrent >= -INV_STANDBY_THRESHOLD && slaveCurrent <= INV_STANDBY_THRESHOLD) {
+                    calculatedSlaveSoc = 100.0;
+                    console.log(`[STANDBY LOCK] Arus ${slaveCurrent}A dalam batas INV threshold (${INV_STANDBY_THRESHOLD}A). SOC dikunci di 100%.`);
+                } else if (lastSlaveSoc >= 100 && slaveCurrent > 0) {
                     calculatedSlaveSoc = 100.0;
                     console.log("[CAP PROTECTION] Slave sudah penuh (100%) dan masih charging. SOC dikunci di 100%.");
                 }
