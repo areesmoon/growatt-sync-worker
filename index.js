@@ -52,14 +52,12 @@ async function run() {
 
         let totalCurrent = 0;
         if (totalVoltage > 0) {
-            // Karena totalPower udah dibalik (charging jadi positif), arus tinggal dibagi tegangan
+            // Arus mentah tanpa toFixed di tengah jalan biar presisi Ah counting
             totalCurrent = totalPower / totalVoltage;
         }
 
-        // --- TAMBAHAN LOAD POWER ---
+        // --- TAMBAHAN LOAD POWER & PANEL SURYA (PPV) ---
         const loadPower = parseFloat(historyLast.outPutPower || 0);
-
-        // --- DATA PANEL SURYA (PPV) ---
         const ppv1 = parseFloat(historyLast.ppv1 || 0);
         const ppv2 = parseFloat(historyLast.ppv2 || 0);
         const totalPpv = parseFloat((ppv1 + ppv2).toFixed(2));
@@ -67,17 +65,16 @@ async function run() {
         // --- DATA MASTER ---
         const masterSoc = parseFloat(parseFloat(historyLast.bmsSoc || 0).toFixed(2));
         const masterVoltage = parseFloat(historyLast.bmsBatteryVolt || totalVoltage);
-        const masterCurrent = parseFloat(historyLast.bmsBatteryCurr || 0); // Biarkan mentah juga
+        const masterCurrent = parseFloat(historyLast.bmsBatteryCurr || 0); // Arus mentah
         const masterPower = masterVoltage * masterCurrent;
 
         // --- DATA SLAVE ---
-        let slaveCurrent = totalCurrent - masterCurrent; 
+        let slaveCurrent = totalCurrent - masterCurrent; // Arus mentah
         const slaveVoltage = totalVoltage;
         const slavePower = slaveVoltage * slaveCurrent;
 
         // --- 2. TARIK DATA TERAKHIR DARI FIRESTORE UNTUK KONTROL & AH COUNTING ---
         const currentTimestampStr = historyLast.calendar || new Date().toISOString();
-        const currentTime = new Date(currentTimestampStr).getTime();
 
         const lastSnapshot = await db.collection('bms_logs')
             .orderBy('timestamp', 'desc')
@@ -88,48 +85,52 @@ async function run() {
 
         if (!lastSnapshot.empty) {
             const lastDoc = lastSnapshot.docs[0].data();
-            const lastTime = new Date(lastDoc.timestamp).getTime();
-            const lastSlaveSoc = lastDoc.slave ? lastDoc.slave.soc : masterSoc;
             const lastMasterSoc = lastDoc.master ? lastDoc.master.soc : masterSoc;
+            const lastSlaveSoc = lastDoc.slave ? lastDoc.slave.soc : masterSoc;
 
-            const deltaSeconds = (currentTime - lastTime) / 1000;
+            // [FIXED INTERVAL 5 MENIT / 300 DETIK]
+            // Mengabaikan fluktuasi timestamp API Growatt demi kestabilan Ah Counting
+            const deltaSeconds = 300; 
 
-            if (deltaSeconds > 0 && deltaSeconds < 3600) {
-                if (masterSoc === 100) {
-                    // Kalibrasi penuh otomatis
-                    slaveSoc = 100.0;
-                    console.log("[CALIBRATION] Master SOC 100%. Slave SOC di-reset otomatis ke 100%.");
-                } else {
-                    // 1. Hitung Ah Counting dasar
-                    const deltaHours = deltaSeconds / 3600;
-                    const deltaAh = slaveCurrent * deltaHours; 
-                    const deltaSocAh = (deltaAh / SLAVE_CAPACITY_AH) * 100;
-                    let calculatedSlaveSoc = lastSlaveSoc + deltaSocAh;
-
-                    // 2. KONTROL KOREKSI BERDASARKAN PERUBAHAN SOC MASTER
-                    const masterSocDelta = masterSoc - lastMasterSoc;
-
-                    if (masterSocDelta !== 0) {
-                        const correctionWeight = 0.2; // 20% bobot koreksi master, 80% murni Ah counting
-                        const masterGuidedSoc = lastSlaveSoc + masterSocDelta;
-                        
-                        calculatedSlaveSoc = (calculatedSlaveSoc * (1 - correctionWeight)) + (masterGuidedSoc * correctionWeight);
-                        console.log(`[MASTER GUIDED CONTROL] Master Delta: ${masterSocDelta}% | Koreksi diterapkan.`);
-                    }
-
-                    // Batasi rentang SOC antara 0 sampai 100
-                    slaveSoc = parseFloat(Math.min(100, Math.max(0, calculatedSlaveSoc)).toFixed(2));
-                    
-                    console.log(`[AH COUNTING + CONTROL] Delta T: ${deltaSeconds}s | Slave SOC Final: ${slaveSoc}%`);
-                }
+            if (masterSoc === 100) {
+                // Kalibrasi penuh otomatis
+                slaveSoc = 100.0;
+                console.log("[CALIBRATION] Master SOC 100%. Slave SOC di-reset otomatis ke 100%.");
             } else {
-                console.log("[WARNING] Delta waktu tidak valid, menggunakan SOC Master sementara.");
+                // 1. Hitung Ah Counting dasar
+                const deltaHours = deltaSeconds / 3600;
+                const deltaAh = slaveCurrent * deltaHours; 
+                const deltaSocAh = (deltaAh / SLAVE_CAPACITY_AH) * 100;
+                let calculatedSlaveSoc = lastSlaveSoc + deltaSocAh;
+
+                // 2. KONTROL KOREKSI BERDASARKAN PERUBAHAN SOC MASTER
+                const masterSocDelta = masterSoc - lastMasterSoc;
+
+                if (masterSocDelta !== 0) {
+                    const correctionWeight = 0.3; // Bobot koreksi master 30%
+                    const masterGuidedSoc = lastSlaveSoc + masterSocDelta;
+                    
+                    calculatedSlaveSoc = (calculatedSlaveSoc * (1 - correctionWeight)) + (masterGuidedSoc * correctionWeight);
+                    console.log(`[MASTER GUIDED CONTROL] Master Delta: ${masterSocDelta}% | Koreksi diterapkan.`);
+                }
+
+                // [PENGAMAN MENTOK 100%]
+                // Jika slave sudah penuh dan arusnya masih positif (charging), kunci di 100%
+                if (lastSlaveSoc >= 100 && slaveCurrent > 0) {
+                    calculatedSlaveSoc = 100.0;
+                    console.log("[CAP PROTECTION] Slave sudah penuh (100%) dan masih charging. SOC dikunci di 100%.");
+                }
+
+                // Batasi rentang SOC antara 0 sampai 100
+                slaveSoc = parseFloat(Math.min(100, Math.max(0, calculatedSlaveSoc)).toFixed(2));
+                
+                console.log(`[FIXED 5-MIN Ah] Arus Slave: ${slaveCurrent.toFixed(2)}A | Delta Ah: ${deltaAh.toFixed(4)}Ah | Slave SOC Final: ${slaveSoc}%`);
             }
         } else {
             console.log("[BOOTSTRAP] Belum ada data historis di Firestore. Gunakan nilai awal master.");
         }
 
-        // --- 3. PAYLOAD FIRESTORE ---
+        // --- 3. PAYLOAD FIRESTORE (Dibulatkan rapi di sini) ---
         const currentTimestamp = new Date(currentTimestampStr).toISOString();
 
         const firestorePayload = {
@@ -144,7 +145,6 @@ async function run() {
                 loadPower,
                 gridVoltage: parseFloat(historyLast.vGrid || 0),
                 gridFreq: parseFloat(historyLast.freqGrid || 0),
-                loadPower: parseFloat(historyLast.outPutPower || 0),
                 inverterTemp: parseFloat(historyLast.InvTemperature || 0)
             },
             master: {
