@@ -1,12 +1,12 @@
 "use strict";
 
-require('dotenv').config({ path: '.env.local' });
+require('dotenv').config({ path: path.join(__dirname, '.env.local') });
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const api = require('growatt');
 
-// 1. Inisialisasi Firebase Admin dengan Service Account Key
-const serviceAccount = require('./serviceAccountKey.json');
+// 1. Inisialisasi Firebase Admin dengan Absolute Path Service Account
+const serviceAccount = require(path.join(__dirname, 'serviceAccountKey.json'));
 
 initializeApp({
     credential: cert(serviceAccount)
