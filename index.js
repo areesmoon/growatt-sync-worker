@@ -46,18 +46,24 @@ async function run() {
         const deviceSn = Object.keys(plantData[plantId].devices)[0];
         const historyLast = plantData[plantId].devices[deviceSn].historyLast;
 
-        // --- DATA TOTAL & SYSTEM ---
+        // --- DATA TOTAL & SYSTEM (DENGAN CHGCURR & DISCHGCURR) ---
         const totalVoltage = parseFloat(historyLast.vBat || 0);
-        const rawPbat = parseFloat(historyLast.pBat || 0);
-
-        // Dibalik tandanya: pBat negatif (charging) jadi positif, pBat positif (discharging) jadi negatif
-        const totalPower = -rawPbat;
-
+        
+        const chgCurr = parseFloat(historyLast.chgCurr || 0);
+        const dischgCurr = parseFloat(historyLast.dischgCurr || 0);
+        
+        // Tentukan total current murni dari arus charging (+) atau discharging (-)
         let totalCurrent = 0;
-        if (totalVoltage > 0) {
-            // Arus mentah tanpa toFixed di tengah jalan biar presisi Ah counting
-            totalCurrent = totalPower / totalVoltage;
+        if (chgCurr > 0) {
+            totalCurrent = chgCurr;
+        } else if (dischgCurr > 0) {
+            totalCurrent = -dischgCurr;
+        } else {
+            totalCurrent = 0;
         }
+
+        // Hitung total power menyesuaikan totalCurrent yang valid
+        const totalPower = totalVoltage * totalCurrent;
 
         // --- TAMBAHAN LOAD POWER & PANEL SURYA (PPV) ---
         const loadPower = parseFloat(historyLast.outPutPower || 0);
