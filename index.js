@@ -58,7 +58,7 @@ async function run() {
         const totalPower = parseFloat((totalVoltage * totalCurrent).toFixed(2));
 
         // --- DATA MASTER ---
-        const masterSoc = parseFloat(historyLast.bmsSoc || 0);
+        const masterSoc = parseFloat(parseFloat(historyLast.bmsSoc || 0).toFixed(2));
         const masterVoltage = parseFloat(historyLast.bmsBatteryVolt || totalVoltage);
         const masterCurrent = parseFloat(historyLast.bmsBatteryCurr || 0);
         const masterPower = parseFloat((masterVoltage * masterCurrent).toFixed(2));
