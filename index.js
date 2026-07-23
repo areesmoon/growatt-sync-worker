@@ -48,12 +48,12 @@ async function run() {
         const rawPbat = parseFloat(historyLast.pBat || 0);
         
         // Dibalik tandanya: pBat negatif (charging) jadi positif, pBat positif (discharging) jadi negatif
-        const totalPower = parseFloat((-rawPbat).toFixed(2));
+        const totalPower = -rawPbat;
 
         let totalCurrent = 0;
         if (totalVoltage > 0) {
             // Karena totalPower udah dibalik (charging jadi positif), arus tinggal dibagi tegangan
-            totalCurrent = parseFloat((totalPower / totalVoltage).toFixed(2));
+            totalCurrent = totalPower / totalVoltage;
         }
 
         // --- TAMBAHAN LOAD POWER ---
@@ -67,13 +67,13 @@ async function run() {
         // --- DATA MASTER ---
         const masterSoc = parseFloat(parseFloat(historyLast.bmsSoc || 0).toFixed(2));
         const masterVoltage = parseFloat(historyLast.bmsBatteryVolt || totalVoltage);
-        const masterCurrent = parseFloat(historyLast.bmsBatteryCurr || 0); 
-        const masterPower = parseFloat((masterVoltage * masterCurrent).toFixed(2));
+        const masterCurrent = parseFloat(historyLast.bmsBatteryCurr || 0); // Biarkan mentah juga
+        const masterPower = masterVoltage * masterCurrent;
 
         // --- DATA SLAVE ---
-        let slaveCurrent = parseFloat((totalCurrent - masterCurrent).toFixed(2));
+        let slaveCurrent = totalCurrent - masterCurrent; 
         const slaveVoltage = totalVoltage;
-        const slavePower = parseFloat((slaveVoltage * slaveCurrent).toFixed(2));
+        const slavePower = slaveVoltage * slaveCurrent;
 
         // --- 2. TARIK DATA TERAKHIR DARI FIRESTORE UNTUK KONTROL & AH COUNTING ---
         const currentTimestampStr = historyLast.calendar || new Date().toISOString();
@@ -138,8 +138,8 @@ async function run() {
             plantName: plantData[plantId].plantName || "Rumah Kablukan",
             system: {
                 totalVoltage,
-                totalCurrent,
-                totalPower,
+                totalCurrent: parseFloat(totalCurrent.toFixed(2)),
+                totalPower: parseFloat(totalPower.toFixed(2)),
                 totalPpv, // Total produksi panel (ppv1 + ppv2)
                 loadPower,
                 gridVoltage: parseFloat(historyLast.vGrid || 0),
@@ -151,7 +151,7 @@ async function run() {
                 soc: masterSoc,
                 voltage: masterVoltage,
                 current: masterCurrent,
-                power: masterPower,
+                power: parseFloat(masterPower.toFixed(2)),
                 soh: parseFloat(historyLast.soh || 0),
                 cycleCount: parseInt(historyLast.cycleCount || 0),
                 temperature: parseFloat(historyLast.bmsBatteryTemp || 0),
@@ -160,8 +160,8 @@ async function run() {
             slave: {
                 soc: slaveSoc,
                 voltage: slaveVoltage,
-                current: slaveCurrent,
-                power: slavePower
+                current: parseFloat(slaveCurrent.toFixed(2)),
+                power: parseFloat(slavePower.toFixed(2))
             }
         };
 
