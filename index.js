@@ -45,37 +45,32 @@ async function run() {
 
         // --- DATA TOTAL & SYSTEM ---
         const totalVoltage = parseFloat(historyLast.vBat || 0);
-        let rawPbat = parseFloat(historyLast.pBat || 0);
-        let rawDischgCurr = parseFloat(historyLast.dischgCurr || 0);
-        let rawChgCurr = parseFloat(historyLast.chgCurr || 0);
+        const rawPbat = parseFloat(historyLast.pBat || 0);
         
+        // Daya sistem menggunakan pBat langsung dari inverter
+        const totalPower = rawPbat;
+
         let totalCurrent = 0;
-        
-        // Deteksi akurat berdasarkan prioritas flag inverter
-        if (rawDischgCurr > 0 || rawPbat > 0) {
-            // Kondisi DISCHARGING (Arus keluar -> Negatif)
-            const currVal = rawDischgCurr > 0 ? rawDischgCurr : (rawPbat / (totalVoltage || 1));
-            totalCurrent = -Math.abs(currVal);
-        } else if (rawChgCurr > 0 || rawPbat < 0) {
-            // Kondisi CHARGING (Arus masuk -> Positif)
-            const currVal = rawChgCurr > 0 ? rawChgCurr : (Math.abs(rawPbat) / (totalVoltage || 1));
-            totalCurrent = Math.abs(currVal);
-        } else {
-            totalCurrent = 0;
+        if (totalVoltage > 0) {
+            // Jika pBat negatif (charging) -> Arus Positif
+            // Jika pBat positif (discharging) -> Arus Negatif
+            // Rumus: I = P / V (dibalik tandanya karena kesepakatan arah arus inverter)
+            totalCurrent = parseFloat((-rawPbat / totalVoltage).toFixed(2));
         }
-        
-        const totalPower = parseFloat((totalVoltage * totalCurrent).toFixed(2));
+
+        // --- DATA PANEL SURYA (PPV) ---
+        const ppv1 = parseFloat(historyLast.ppv1 || 0);
+        const ppv2 = parseFloat(historyLast.ppv2 || 0);
+        const totalPpv = parseFloat((ppv1 + ppv2).toFixed(2));
 
         // --- DATA MASTER ---
         const masterSoc = parseFloat(parseFloat(historyLast.bmsSoc || 0).toFixed(2));
         const masterVoltage = parseFloat(historyLast.bmsBatteryVolt || totalVoltage);
-        const masterCurrent = parseFloat(historyLast.bmsBatteryCurr || 0); // Di data lu bernilai 5.1 (positif/charging)
+        const masterCurrent = parseFloat(historyLast.bmsBatteryCurr || 0); 
         const masterPower = parseFloat((masterVoltage * masterCurrent).toFixed(2));
 
         // --- DATA SLAVE ---
-        // Jika total charging 6.8A dan master charging 5.1A, maka slave = 6.8 - 5.1 = 1.7A (Charging/Positif)
         let slaveCurrent = parseFloat((totalCurrent - masterCurrent).toFixed(2));
-
         const slaveVoltage = totalVoltage;
         const slavePower = parseFloat((slaveVoltage * slaveCurrent).toFixed(2));
 
@@ -111,14 +106,10 @@ async function run() {
                     let calculatedSlaveSoc = lastSlaveSoc + deltaSocAh;
 
                     // 2. KONTROL KOREKSI BERDASARKAN PERUBAHAN SOC MASTER
-                    // Berapa persen Master berubah dari iterasi sebelumnya?
                     const masterSocDelta = masterSoc - lastMasterSoc;
 
                     if (masterSocDelta !== 0) {
-                        // Jika master berubah, kita berikan bobot koreksi agar pergerakan slave 
-                        // terkunci secara proporsional dengan dinamika master (mengurangi akumulasi eror sensor)
-                        // Misal: Slave digeser dikit mendekati arah persentase perubahan master
-                        const correctionWeight = 0.2; // 20% bobot koreksi master, 80% murni Ah counting (bisa disesuaikan)
+                        const correctionWeight = 0.2; // 20% bobot koreksi master, 80% murni Ah counting
                         const masterGuidedSoc = lastSlaveSoc + masterSocDelta;
                         
                         calculatedSlaveSoc = (calculatedSlaveSoc * (1 - correctionWeight)) + (masterGuidedSoc * correctionWeight);
@@ -148,6 +139,7 @@ async function run() {
                 totalVoltage,
                 totalCurrent,
                 totalPower,
+                totalPpv, // Total produksi panel (ppv1 + ppv2)
                 gridVoltage: parseFloat(historyLast.vGrid || 0),
                 gridFreq: parseFloat(historyLast.freqGrid || 0),
                 loadPower: parseFloat(historyLast.outPutPower || 0),

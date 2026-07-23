@@ -35,7 +35,7 @@ async function run() {
             deviceData: false,
             weather: false,
             totalData: false,
-            statusData: false,
+            statusData: true,
             historyAll: false
         });
 
@@ -43,7 +43,7 @@ async function run() {
         const deviceSn = Object.keys(plantData[plantId].devices)[0];
         const historyLast = plantData[plantId].devices[deviceSn].historyLast;
 
-        console.log(JSON.stringify(historyLast, 0, 2));
+        console.log(JSON.stringify(plantData, 0, 2));
 
     } catch (error) {
         console.error("Gagal ambil data:", error.message);
