@@ -1,5 +1,7 @@
 "use strict";
 
+const path = require('path');
+// Pakai absolute path biar aman dibaca dari direktori mana pun (termasuk Cron Job)
 require('dotenv').config({ path: path.join(__dirname, '.env.local') });
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
