@@ -47,15 +47,13 @@ async function run() {
         const totalVoltage = parseFloat(historyLast.vBat || 0);
         const rawPbat = parseFloat(historyLast.pBat || 0);
         
-        // Daya sistem menggunakan pBat langsung dari inverter
-        const totalPower = rawPbat;
+        // Dibalik tandanya: pBat negatif (charging) jadi positif, pBat positif (discharging) jadi negatif
+        const totalPower = parseFloat((-rawPbat).toFixed(2));
 
         let totalCurrent = 0;
         if (totalVoltage > 0) {
-            // Jika pBat negatif (charging) -> Arus Positif
-            // Jika pBat positif (discharging) -> Arus Negatif
-            // Rumus: I = P / V (dibalik tandanya karena kesepakatan arah arus inverter)
-            totalCurrent = parseFloat((-rawPbat / totalVoltage).toFixed(2));
+            // Karena totalPower udah dibalik (charging jadi positif), arus tinggal dibagi tegangan
+            totalCurrent = parseFloat((totalPower / totalVoltage).toFixed(2));
         }
 
         // --- DATA PANEL SURYA (PPV) ---
