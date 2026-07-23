@@ -56,6 +56,9 @@ async function run() {
             totalCurrent = parseFloat((totalPower / totalVoltage).toFixed(2));
         }
 
+        // --- TAMBAHAN LOAD POWER ---
+        const loadPower = parseFloat(historyLast.outPutPower || 0);
+
         // --- DATA PANEL SURYA (PPV) ---
         const ppv1 = parseFloat(historyLast.ppv1 || 0);
         const ppv2 = parseFloat(historyLast.ppv2 || 0);
@@ -138,6 +141,7 @@ async function run() {
                 totalCurrent,
                 totalPower,
                 totalPpv, // Total produksi panel (ppv1 + ppv2)
+                loadPower,
                 gridVoltage: parseFloat(historyLast.vGrid || 0),
                 gridFreq: parseFloat(historyLast.freqGrid || 0),
                 loadPower: parseFloat(historyLast.outPutPower || 0),
