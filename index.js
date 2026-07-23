@@ -49,7 +49,7 @@ async function run() {
         // --- DATA TOTAL & SYSTEM ---
         const totalVoltage = parseFloat(historyLast.vBat || 0);
         const rawPbat = parseFloat(historyLast.pBat || 0);
-        
+
         // Dibalik tandanya: pBat negatif (charging) jadi positif, pBat positif (discharging) jadi negatif
         const totalPower = -rawPbat;
 
@@ -93,22 +93,24 @@ async function run() {
 
             // [FIXED INTERVAL 5 MENIT / 300 DETIK]
             // Mengabaikan fluktuasi timestamp API Growatt demi kestabilan Ah Counting
-            const deltaSeconds = 300; 
+            const deltaSeconds = 300;
 
             if (masterSoc === 100) {
                 // Kalibrasi penuh otomatis
                 slaveSoc = 100.0;
                 console.log("[CALIBRATION] Master SOC 100%. Slave SOC di-reset otomatis ke 100%.");
             } else {
-                // 1. Hitung Ah Counting dasar dengan Deadzone Filter Inverter Threshold
+                // 1. Hitung Ah Counting dasar
                 const deltaHours = deltaSeconds / 3600;
-                
+
+                // [DEADZONE FILTER BERDASARKAN TOTAL CURRENT / INVERTER IDLE]
+                // Cek apakah inverter secara total sedang dalam status standby/idle (arus total kecil)
                 let effectiveSlaveCurrent = slaveCurrent;
-                if (Math.abs(slaveCurrent) <= INV_STANDBY_THRESHOLD) {
-                    effectiveSlaveCurrent = 0; // Abaikan arus kecil standby inverter
+                if (Math.abs(totalCurrent) <= INV_STANDBY_THRESHOLD) {
+                    effectiveSlaveCurrent = 0; // Jika inverter idle, anggap slave tidak narik/nyimpen apa-apa
                 }
 
-                const deltaAh = effectiveSlaveCurrent * deltaHours; 
+                const deltaAh = effectiveSlaveCurrent * deltaHours;
                 const deltaSocAh = (deltaAh / SLAVE_CAPACITY_AH) * 100;
                 let calculatedSlaveSoc = lastSlaveSoc + deltaSocAh;
 
@@ -118,16 +120,16 @@ async function run() {
                 if (masterSocDelta !== 0) {
                     const correctionWeight = 0.3; // Bobot koreksi master 30%
                     const masterGuidedSoc = lastSlaveSoc + masterSocDelta;
-                    
+
                     calculatedSlaveSoc = (calculatedSlaveSoc * (1 - correctionWeight)) + (masterGuidedSoc * correctionWeight);
                     console.log(`[MASTER GUIDED CONTROL] Master Delta: ${masterSocDelta}% | Koreksi diterapkan.`);
                 }
 
-                // [STANDBY LOCK & CAP PROTECTION]
-                // Jika master/slave sudah penuh dan arusnya masih dalam batas standby threshold inverter, kunci di 100%
-                if ((masterSoc === 100 || lastSlaveSoc >= 100) && slaveCurrent >= -INV_STANDBY_THRESHOLD && slaveCurrent <= INV_STANDBY_THRESHOLD) {
+                // [STANDBY LOCK BERDASARKAN TOTAL CURRENT]
+                // Jika master/slave sudah penuh dan inverter sedang dalam kondisi standby (totalCurrent kecil)
+                if ((masterSoc === 100 || lastSlaveSoc >= 100) && totalCurrent >= -INV_STANDBY_THRESHOLD && totalCurrent <= INV_STANDBY_THRESHOLD) {
                     calculatedSlaveSoc = 100.0;
-                    console.log(`[STANDBY LOCK] Arus ${slaveCurrent}A dalam batas INV threshold (${INV_STANDBY_THRESHOLD}A). SOC dikunci di 100%.`);
+                    console.log(`[STANDBY LOCK] Total Inverter Current ${totalCurrent.toFixed(2)}A dalam batas INV threshold (${INV_STANDBY_THRESHOLD}A). SOC dikunci di 100%.`);
                 } else if (lastSlaveSoc >= 100 && slaveCurrent > 0) {
                     calculatedSlaveSoc = 100.0;
                     console.log("[CAP PROTECTION] Slave sudah penuh (100%) dan masih charging. SOC dikunci di 100%.");
@@ -135,7 +137,6 @@ async function run() {
 
                 // Batasi rentang SOC antara 0 sampai 100
                 slaveSoc = parseFloat(Math.min(100, Math.max(0, calculatedSlaveSoc)).toFixed(2));
-                
                 console.log(`[FIXED 5-MIN Ah] Arus Slave: ${slaveCurrent.toFixed(2)}A | Delta Ah: ${deltaAh.toFixed(4)}Ah | Slave SOC Final: ${slaveSoc}%`);
             }
         } else {
