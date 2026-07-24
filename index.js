@@ -1,5 +1,6 @@
 "use strict";
 
+const { exec } = require('child_process');
 const path = require('path');
 // Memuat konfigurasi environment dari file .env.local dengan absolute path
 require('dotenv').config({ path: path.join(__dirname, '.env.local') });
@@ -190,6 +191,28 @@ async function run() {
                     calculatedSlaveAh = (masterSoc / 100) * SLAVE_CAPACITY_AH;
                     console.log(`[AUTO-SYNC FULL] Inverter berhenti nge-charge (chgCurr: ${inverterChgCurr}A) dengan SOC tinggi (${slaveSocCheck.toFixed(1)}%). Ah di-sync selaras dengan Master.`);
                 }
+
+                // [AUTO-TRIGGER CORRECT.JS]: Jika sebelumnya di bawah kapasitas, 
+                // tapi hasil kalkulasi baru ini tembus kapasitas maksimal, panggil correct.js otomatis!
+                if (lastSlaveAh < SLAVE_CAPACITY_AH && calculatedSlaveAh >= SLAVE_CAPACITY_AH) {
+                    console.log(`\n🚨 [AUTO-CORRECT TRIGGER] Slave tembus batas penuh (${calculatedSlaveAh.toFixed(2)}Ah). Menjalankan correct.js otomatis...`);
+
+                    const scriptPath = path.join(__dirname, 'correct.js');
+                    const command = `node "${scriptPath}" --slave_ah=${SLAVE_CAPACITY_AH}`;
+
+                    exec(command, (error, stdout, stderr) => {
+                        if (error) {
+                            console.error(`❌ Gagal menjalankan correct.js otomatis: ${error.message}`);
+                            return;
+                        }
+                        if (stderr) {
+                            console.error(`⚠️ Warning dari correct.js: ${stderr}`);
+                        }
+                        console.log(`✅ Sukses Eksekusi Otomatis:\n${stdout}`);
+                    });
+                }
+
+                slaveAh = parseFloat(Math.min(SLAVE_CAPACITY_AH, Math.max(0, calculatedSlaveAh)).toFixed(2));
 
                 // Batasi nilai Ah slave di antara 0 sampai kapasitas maksimum nominalnya
                 slaveAh = parseFloat(Math.min(SLAVE_CAPACITY_AH, Math.max(0, calculatedSlaveAh)).toFixed(2));
