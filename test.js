@@ -36,7 +36,8 @@ async function run() {
             weather: false,
             totalData: false,
             statusData: true,
-            historyAll: false
+            historyAll: false,
+            historyLast: false
         });
 
         const plantId = Object.keys(plantData)[0];

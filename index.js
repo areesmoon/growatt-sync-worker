@@ -1,13 +1,14 @@
 "use strict";
 
 const path = require('path');
-// Pakai absolute path biar aman dibaca dari direktori mana pun (termasuk Cron Job)
+// Memuat konfigurasi environment dari file .env.local dengan absolute path
 require('dotenv').config({ path: path.join(__dirname, '.env.local') });
+
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const api = require('growatt');
 
-// 1. Inisialisasi Firebase Admin dengan Absolute Path Service Account
+// 1. Inisialisasi koneksi ke Firestore menggunakan file kredensial service account
 const serviceAccount = require(path.join(__dirname, 'serviceAccountKey.json'));
 
 initializeApp({
@@ -16,157 +17,206 @@ initializeApp({
 
 const db = getFirestore();
 
-// Kredensial & Konfigurasi Baterai Slave
+// 2. Memuat konfigurasi kredensial, kapasitas baterai (Ah), threshold, dan nama collection dari .env.local
 const username = process.env.GROWATT_USERNAME;
 const password = process.env.GROWATT_PASSWORD;
-const SLAVE_CAPACITY_AH = 100; // Sesuaikan kapasitas nominal slave lu
-
-// Ambil konfigurasi threshold inverter dari .env.local (default 0.4 A jika kosong)
+const MASTER_CAPACITY_AH = parseFloat(process.env.MASTER_CAPACITY_AH || 100);
+const SLAVE_CAPACITY_AH = parseFloat(process.env.SLAVE_CAPACITY_AH || 100);
 const INV_STANDBY_THRESHOLD = parseFloat(process.env.INV_STANDBY_THRESHOLD_AMP || 0.4);
+const FIRESTORE_COLLECTION = process.env.FIRESTORE_COLLECTION || 'bms_logs';
 
 async function run() {
     try {
+        // Validasi awal keberadaan kredensial
         if (!username || !password) {
             throw new Error("Kredensial Growatt belum diset di file .env.local!");
         }
 
+        // 3. Autentikasi dan login ke API inverter Growatt
         const growatt = new api({});
         await growatt.login(username, password);
 
+        // 4. Menarik data plant dengan opsi totalData: true untuk statistik energi kumulatif (kWh)
         let plantData = await growatt.getAllPlantData({
             plantData: false,
             deviceData: false,
             weather: false,
-            totalData: false,
+            totalData: true,
             statusData: false,
             historyAll: false
         });
 
+        // 5. Mengambil objek data spesifik milik device inverter yang terhubung
         const plantId = Object.keys(plantData)[0];
-        const deviceSn = Object.keys(plantData[plantId].devices)[0];
-        const historyLast = plantData[plantId].devices[deviceSn].historyLast;
+        const plantObj = plantData[plantId] || {};
+        const deviceSn = Object.keys(plantObj.devices)[0];
+        const deviceNode = plantObj.devices[deviceSn];
+        const historyLast = deviceNode.historyLast;
+        const totalData = deviceNode.totalData || {};
 
-        // --- DATA TOTAL & SYSTEM (DENGAN CHGCURR & DISCHGCURR) ---
-        const totalVoltage = parseFloat(historyLast.vBat || 0);
-        
-        const chgCurr = parseFloat(historyLast.chgCurr || 0);
-        const dischgCurr = parseFloat(historyLast.dischgCurr || 0);
-        
-        // Tentukan total current murni dari arus charging (+) atau discharging (-)
+        // 6. Mengambil angka energi kumulatif mentah dari inverter (dalam satuan kWh)
+        const powerChargeTotal = parseFloat(totalData.chargeTotal || 0);
+        const powerDischargeTotal = parseFloat(totalData.eDischargeTotal || 0);
+
+        // 7. Mengambil data mentah tegangan dan daya baterai dari API untuk presisi maksimal
+        const rawTotalVoltage = parseFloat(historyLast.vBat || 0);
+        const totalPower = parseFloat(historyLast.pBat || 0) * -1; // pBat dibalik polaritasnya agar sinkron
+
+        // [PENYESUAIAN PRESISI]: Arus total dihitung langsung dari pBat / vBat
         let totalCurrent = 0;
-        if (chgCurr > 0) {
-            totalCurrent = chgCurr;
-        } else if (dischgCurr > 0) {
-            totalCurrent = -dischgCurr;
+        if (rawTotalVoltage > 0) {
+            totalCurrent = parseFloat((totalPower / rawTotalVoltage).toFixed(2));
         } else {
             totalCurrent = 0;
         }
 
-        // Hitung total power menyesuaikan totalCurrent yang valid
-        const totalPower = totalVoltage * totalCurrent;
-
-        // --- TAMBAHAN LOAD POWER & PANEL SURYA (PPV) ---
+        // Membaca parameter pendukung lain (beban rumah & produksi panel surya/PPV)
         const loadPower = parseFloat(historyLast.outPutPower || 0);
         const ppv1 = parseFloat(historyLast.ppv1 || 0);
         const ppv2 = parseFloat(historyLast.ppv2 || 0);
         const totalPpv = parseFloat((ppv1 + ppv2).toFixed(2));
 
-        // --- DATA MASTER ---
+        // 8. Mengambil data status baterai Master langsung dari BMS inverter (SOC%)
         const masterSoc = parseFloat(parseFloat(historyLast.bmsSoc || 0).toFixed(2));
-        const masterVoltage = parseFloat(historyLast.bmsBatteryVolt || totalVoltage);
-        const masterCurrent = parseFloat(historyLast.bmsBatteryCurr || 0); // Arus mentah
-        const masterPower = masterVoltage * masterCurrent;
+        const masterCurrent = parseFloat(historyLast.bmsBatteryCurr || 0);
 
-        // --- DATA SLAVE ---
-        let slaveCurrent = totalCurrent - masterCurrent; // Arus mentah
-        const slaveVoltage = totalVoltage;
-        const slavePower = slaveVoltage * slaveCurrent;
+        // Hitung Ah Master mutlak saat ini berdasarkan perkalian SOC% dengan kapasitas nominalnya
+        const currentMasterAh = parseFloat(((masterSoc / 100) * MASTER_CAPACITY_AH).toFixed(2));
 
-        // --- 2. TARIK DATA TERAKHIR DARI FIRESTORE UNTUK KONTROL & AH COUNTING ---
+        // 9. Menarik log snapshot terakhir dari Firestore (untuk acuan Ah sebelumnya & vBat rata-rata)
         const currentTimestampStr = historyLast.calendar || new Date().toISOString();
 
-        const lastSnapshot = await db.collection('bms_logs')
+        const lastSnapshot = await db.collection(FIRESTORE_COLLECTION)
             .orderBy('timestamp', 'desc')
             .limit(1)
             .get();
 
-        let slaveSoc = masterSoc; // Default awal
+        // 10. Menghitung tegangan rata-rata (vBat) antara t-5 dan t-0, serta inisialisasi nilai energi kumulatif
+        let totalVoltage = rawTotalVoltage;
+        let lastChargeTotal = powerChargeTotal;
+        let lastDischargeTotal = powerDischargeTotal;
+        const dischgCurr = parseFloat(historyLast.dischgCurr || 0);
 
         if (!lastSnapshot.empty) {
             const lastDoc = lastSnapshot.docs[0].data();
-            const lastMasterSoc = lastDoc.master ? lastDoc.master.soc : masterSoc;
-            const lastSlaveSoc = lastDoc.slave ? lastDoc.slave.soc : masterSoc;
+            const lastTotalVoltage = lastDoc.system ? (lastDoc.system.totalVoltage || rawTotalVoltage) : rawTotalVoltage;
 
-            // [FIXED INTERVAL 5 MENIT / 300 DETIK]
-            // Mengabaikan fluktuasi timestamp API Growatt demi kestabilan Ah Counting
-            const deltaSeconds = 300;
-
-            if (masterSoc === 100) {
-                // Kalibrasi penuh otomatis
-                slaveSoc = 100.0;
-                console.log("[CALIBRATION] Master SOC 100%. Slave SOC di-reset otomatis ke 100%.");
-            } else {
-                // 1. Hitung Ah Counting dasar
-                const deltaHours = deltaSeconds / 3600;
-
-                // [DEADZONE FILTER BERDASARKAN TOTAL CURRENT / INVERTER IDLE]
-                // Cek apakah inverter secara total sedang dalam status standby/idle (arus total kecil)
-                let effectiveSlaveCurrent = slaveCurrent;
-                if (Math.abs(totalCurrent) <= INV_STANDBY_THRESHOLD) {
-                    effectiveSlaveCurrent = 0; // Jika inverter idle, anggap slave tidak narik/nyimpen apa-apa
-                }
-
-                const deltaAh = effectiveSlaveCurrent * deltaHours;
-                const deltaSocAh = (deltaAh / SLAVE_CAPACITY_AH) * 100;
-                let calculatedSlaveSoc = lastSlaveSoc + deltaSocAh;
-
-                // 2. KONTROL KOREKSI BERDASARKAN PERUBAHAN SOC MASTER
-                const masterSocDelta = masterSoc - lastMasterSoc;
-
-                if (masterSocDelta !== 0) {
-                    const correctionWeight = 0.3; // Bobot koreksi master 30%
-                    const masterGuidedSoc = lastSlaveSoc + masterSocDelta;
-
-                    calculatedSlaveSoc = (calculatedSlaveSoc * (1 - correctionWeight)) + (masterGuidedSoc * correctionWeight);
-                    console.log(`[MASTER GUIDED CONTROL] Master Delta: ${masterSocDelta}% | Koreksi diterapkan.`);
-                }
-
-                // [STANDBY LOCK BERDASARKAN TOTAL CURRENT]
-                // Jika master/slave sudah penuh dan inverter sedang dalam kondisi standby (totalCurrent kecil)
-                if ((masterSoc === 100 || lastSlaveSoc >= 100) && totalCurrent >= -INV_STANDBY_THRESHOLD && totalCurrent <= INV_STANDBY_THRESHOLD) {
-                    calculatedSlaveSoc = 100.0;
-                    console.log(`[STANDBY LOCK] Total Inverter Current ${totalCurrent.toFixed(2)}A dalam batas INV threshold (${INV_STANDBY_THRESHOLD}A). SOC dikunci di 100%.`);
-                } else if (lastSlaveSoc >= 100 && slaveCurrent > 0) {
-                    calculatedSlaveSoc = 100.0;
-                    console.log("[CAP PROTECTION] Slave sudah penuh (100%) dan masih charging. SOC dikunci di 100%.");
-                }
-
-                // Batasi rentang SOC antara 0 sampai 100
-                slaveSoc = parseFloat(Math.min(100, Math.max(0, calculatedSlaveSoc)).toFixed(2));
-                console.log(`[FIXED 5-MIN Ah] Arus Slave: ${slaveCurrent.toFixed(2)}A | Delta Ah: ${deltaAh.toFixed(4)}Ah | Slave SOC Final: ${slaveSoc}%`);
+            if (lastTotalVoltage > 0 && rawTotalVoltage > 0) {
+                totalVoltage = parseFloat(((lastTotalVoltage + rawTotalVoltage) / 2).toFixed(2));
             }
-        } else {
-            console.log("[BOOTSTRAP] Belum ada data historis di Firestore. Gunakan nilai awal master.");
+
+            if (lastDoc.system) {
+                lastChargeTotal = lastDoc.system.chargeTotal !== undefined ? lastDoc.system.chargeTotal : powerChargeTotal;
+                lastDischargeTotal = lastDoc.system.dischargeTotal !== undefined ? lastDoc.system.dischargeTotal : powerDischargeTotal;
+            }
         }
 
-        // --- 3. PAYLOAD FIRESTORE (Dibulatkan rapi di sini) ---
+        const masterVoltage = parseFloat(historyLast.bmsBatteryVolt || totalVoltage);
+        const masterPower = masterVoltage * masterCurrent;
+
+        // 11. Menghitung arus sementara untuk baterai Slave
+        let slaveCurrent = totalCurrent - masterCurrent;
+        if (masterSoc === 100 && dischgCurr === -INV_STANDBY_THRESHOLD) {
+            slaveCurrent = 0;
+        }
+
+        // Inisialisasi nilai Ah awal slave
+        let slaveAh = (masterSoc / 100) * SLAVE_CAPACITY_AH;
+        let slaveSoc = masterSoc;
+
+        // 12. Logika Utama Kalkulasi Berbasis Ah Murni (ENERGY-TO-AH INTEGRATION ONLY)
+        if (!lastSnapshot.empty) {
+            const lastDoc = lastSnapshot.docs[0].data();
+
+            // Ambil data Ah Master & Slave sebelumnya dari Firestore
+            const lastMasterAh = lastDoc.master && lastDoc.master.ah !== undefined
+                ? lastDoc.master.ah
+                : currentMasterAh;
+
+            const lastSlaveAh = lastDoc.slave && lastDoc.slave.ah !== undefined
+                ? lastDoc.slave.ah
+                : ((lastDoc.slave ? lastDoc.slave.soc : masterSoc) / 100) * SLAVE_CAPACITY_AH;
+
+            if (masterSoc === 100) {
+                // Kalibrasi otomatis penuh
+                slaveAh = SLAVE_CAPACITY_AH;
+                slaveSoc = 100.0;
+                console.log("[CALIBRATION] Master SOC 100%. Slave Ah & SOC di-reset otomatis penuh ke 100%.");
+            } else {
+                // Hitung delta energi kumulatif (kWh) dari inverter
+                const deltaChargeKwh = powerChargeTotal - lastChargeTotal;
+                const deltaDischargeKwh = powerDischargeTotal - lastDischargeTotal;
+                const netEnergyKwh = deltaChargeKwh - deltaDischargeKwh;
+
+                let calculatedSlaveAh = lastSlaveAh;
+
+                // [ATURAN MUTLAK DENGAN FAKTOR KOREKSI]: 
+                const SLAVE_CORRECTION_FACTOR = parseFloat(process.env.SLAVE_CORRECTION_FACTOR || 0.58);
+
+                if (totalVoltage > 0 && (deltaChargeKwh !== 0 || deltaDischargeKwh !== 0)) {
+                    // Konversi kWh netto ke Total Ah sistem secara mutlak
+                    const totalAhSystem = (netEnergyKwh * 1000) / totalVoltage;
+
+                    // Hitung delta Ah yang terpakai/masuk di Master
+                    const masterAhDelta = currentMasterAh - lastMasterAh;
+
+                    // Sisa delta Ah murni milik Slave setelah dikurangi master, lalu dikali faktor koreksi empiris lapangan
+                    const rawSlaveAhDelta = totalAhSystem - masterAhDelta;
+                    const slaveAhDelta = rawSlaveAhDelta * SLAVE_CORRECTION_FACTOR;
+                    
+                    calculatedSlaveAh = lastSlaveAh + slaveAhDelta;
+
+                    console.log(`[CORRECTED ENERGY-TO-AH] Net kWh: ${netEnergyKwh.toFixed(4)} | Raw Delta: ${rawSlaveAhDelta.toFixed(2)} | Corrected Delta: ${slaveAhDelta.toFixed(2)}`);
+                } else {
+                    // JIKA KWH KUMULATIF MANDEK (DELTA 0): Slave mutlak diam/statis ngikutin nilai terakhirnya!
+                    calculatedSlaveAh = lastSlaveAh;
+                    console.log(`[STATIC] kWh Kumulatif Mandek (Delta 0). Slave Ah dipertahankan statis di: ${lastSlaveAh}Ah`);
+                }
+
+                // 13. Aturan Pengaman (Standby Lock & Cap Protection) berbasis Ah
+                if ((masterSoc === 100 || lastSlaveAh >= SLAVE_CAPACITY_AH) && (Math.abs(totalCurrent) <= INV_STANDBY_THRESHOLD || dischgCurr === -INV_STANDBY_THRESHOLD)) {
+                    calculatedSlaveAh = SLAVE_CAPACITY_AH;
+                    console.log("[STANDBY LOCK] Inverter idle / Standby, Slave Ah dikunci penuh.");
+                } else if (lastSlaveAh >= SLAVE_CAPACITY_AH && slaveCurrent > 0) {
+                    calculatedSlaveAh = SLAVE_CAPACITY_AH;
+                    console.log("[CAP PROTECTION] Slave penuh & masih charging, Ah dikunci.");
+                }
+
+                // Batasi nilai Ah slave di antara 0 sampai kapasitas maksimum nominalnya
+                slaveAh = parseFloat(Math.min(SLAVE_CAPACITY_AH, Math.max(0, calculatedSlaveAh)).toFixed(2));
+
+                // Turunkan persentase SOC untuk display dashboard
+                slaveSoc = parseFloat(((slaveAh / SLAVE_CAPACITY_AH) * 100).toFixed(2));
+                console.log(`[RESULT] Slave Ah: ${slaveAh}Ah / ${SLAVE_CAPACITY_AH}Ah | Slave SOC: ${slaveSoc}%`);
+            }
+        } else {
+            console.log("[BOOTSTRAP] Belum ada data historis di Firestore. Inisialisasi awal Ah berbasis Master.");
+        }
+
+        const slaveVoltage = totalVoltage;
+        const slavePower = slaveVoltage * slaveCurrent;
+
+        // 14. Menyusun struktur payload data matang dengan menyertakan nilai Ah dan SOC% untuk display
         const currentTimestamp = new Date(currentTimestampStr).toISOString();
 
         const firestorePayload = {
             timestamp: currentTimestamp,
             deviceSn: deviceSn,
-            plantName: plantData[plantId].plantName || "Rumah Kablukan",
+            plantName: plantObj.plantName || "Rumah Kablukan",
             system: {
                 totalVoltage,
                 totalCurrent: parseFloat(totalCurrent.toFixed(2)),
                 totalPower: parseFloat(totalPower.toFixed(2)),
-                totalPpv, // Total produksi panel (ppv1 + ppv2)
+                totalPpv,
                 loadPower,
+                chargeTotal: powerChargeTotal,
+                dischargeTotal: powerDischargeTotal,
                 gridVoltage: parseFloat(historyLast.vGrid || 0),
                 gridFreq: parseFloat(historyLast.freqGrid || 0),
                 inverterTemp: parseFloat(historyLast.InvTemperature || 0)
             },
             master: {
+                ah: currentMasterAh,
                 soc: masterSoc,
                 voltage: masterVoltage,
                 current: masterCurrent,
@@ -177,6 +227,7 @@ async function run() {
                 statusBms: historyLast.bmsStatus || 0
             },
             slave: {
+                ah: slaveAh,
                 soc: slaveSoc,
                 voltage: slaveVoltage,
                 current: parseFloat(slaveCurrent.toFixed(2)),
@@ -184,20 +235,20 @@ async function run() {
             }
         };
 
-        // --- 4. CEK DUPLIKAT BERDASARKAN TIMESTAMP ---
-        const existingDocs = await db.collection('bms_logs')
+        // 15. Pengecekan duplikat data berdasarkan timestamp
+        const existingDocs = await db.collection(FIRESTORE_COLLECTION)
             .where('timestamp', '==', currentTimestamp)
             .limit(1)
             .get();
 
         if (!existingDocs.empty) {
-            console.log(`[SKIP] Data dengan timestamp ${currentTimestamp} sudah ada di Firestore. Lewati penyimpanan.`);
+            console.log(`[SKIP] Data dengan timestamp ${currentTimestamp} sudah ada di Firestore (${FIRESTORE_COLLECTION}).`);
             return;
         }
 
-        // --- 5. SIMPAN KE FIRESTORE ---
-        const docRef = await db.collection('bms_logs').add(firestorePayload);
-        console.log(`[SUCCESS] Data baru berhasil disimpan dengan ID: ${docRef.id}`);
+        // 16. Menyimpan dokumen payload baru ke Firestore
+        const docRef = await db.collection(FIRESTORE_COLLECTION).add(firestorePayload);
+        console.log(`[SUCCESS] Data Ah & SOC berhasil disimpan ke [${FIRESTORE_COLLECTION}] dengan ID: ${docRef.id}`);
 
     } catch (error) {
         console.error("Gagal ambil data:", error.message);
