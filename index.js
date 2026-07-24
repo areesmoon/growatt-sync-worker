@@ -143,14 +143,14 @@ async function run() {
                 lastInverterMode = lastDoc.system.inverterMode;
             }
 
-            //ambil last grid voltage
-            if (lastDoc.system && lastDoc.system.gridVoltage) {
-                lastGridVoltage = lastDoc.system.gridVoltage;
+            // Ambil last grid voltage dengan aman
+            if (lastDoc.system && lastDoc.system.gridVoltage !== undefined) {
+                lastGridVoltage = parseFloat(lastDoc.system.gridVoltage) || 0;
             }
 
-            //ambil last total PPV
-            if (lastDoc.system && lastDoc.system.totalPpv) {
-                lastTotalPpv = lastDoc.system.totalPpv;
+            // Ambil last total PPV dengan aman
+            if (lastDoc.system && lastDoc.system.totalPpv !== undefined) {
+                lastTotalPpv = parseFloat(lastDoc.system.totalPpv) || 0;
             }
 
             const lastTotalVoltage = lastDoc.system ? (lastDoc.system.totalVoltage || rawTotalVoltage) : rawTotalVoltage;
