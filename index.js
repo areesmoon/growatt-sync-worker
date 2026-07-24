@@ -248,9 +248,16 @@ async function run() {
         }
 
         // 16. Menyimpan dokumen payload baru ke Firestore
-        const docRef = await db.collection(FIRESTORE_COLLECTION).add(firestorePayload);
-        console.log(`[SUCCESS] Data Ah & SOC berhasil disimpan ke [${FIRESTORE_COLLECTION}] dengan ID: ${docRef.id}`);
+        // Format timestamp jadi string aman untuk Firestore Document ID
+        // Contoh: "2026-07-24T03:31:17.000Z" diubah jadi "2026-07-24_03-31-17"
+        const customDocId = currentTimestamp
+            .replace(/[:.]/g, '-')  // ganti titik dan titik dua jadi dash (-)
+            .replace('T', '_');     // ganti T jadi underscore (_)
 
+        // Menyimpan dokumen dengan Custom ID yang rapi
+        await db.collection(FIRESTORE_COLLECTION).doc(customDocId).set(firestorePayload);
+        console.log(`[SUCCESS] Data berhasil disimpan dengan Custom ID: ${customDocId}`);
+        
     } catch (error) {
         console.error("Gagal ambil data:", error.message);
     }
