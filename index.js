@@ -24,6 +24,7 @@ const MASTER_CAPACITY_AH = parseFloat(process.env.MASTER_CAPACITY_AH || 100);
 const SLAVE_CAPACITY_AH = parseFloat(process.env.SLAVE_CAPACITY_AH || 100);
 const INV_STANDBY_THRESHOLD = parseFloat(process.env.INV_STANDBY_THRESHOLD_AMP || 0.4);
 const FIRESTORE_COLLECTION = process.env.FIRESTORE_COLLECTION || 'bms_logs';
+let SLAVE_CORRECTION_FACTOR = parseFloat(process.env.SLAVE_CORRECTION_FACTOR || 0.58);
 
 async function run() {
     try {
@@ -128,6 +129,8 @@ async function run() {
         if (!lastSnapshot.empty) {
             const lastDoc = lastSnapshot.docs[0].data();
 
+            SLAVE_CORRECTION_FACTOR = parseFloat(lastDoc.correctionFactor || SLAVE_CORRECTION_FACTOR);
+
             // Ambil data Ah Master & Slave sebelumnya dari Firestore
             const lastMasterAh = lastDoc.master && lastDoc.master.ah !== undefined
                 ? lastDoc.master.ah
@@ -150,9 +153,6 @@ async function run() {
 
                 let calculatedSlaveAh = lastSlaveAh;
 
-                // [ATURAN MUTLAK DENGAN FAKTOR KOREKSI]: 
-                const SLAVE_CORRECTION_FACTOR = parseFloat(process.env.SLAVE_CORRECTION_FACTOR || 0.58);
-
                 if (totalVoltage > 0 && (deltaChargeKwh !== 0 || deltaDischargeKwh !== 0)) {
                     // Konversi kWh netto ke Total Ah sistem secara mutlak
                     const totalAhSystem = (netEnergyKwh * 1000) / totalVoltage;
@@ -163,7 +163,7 @@ async function run() {
                     // Sisa delta Ah murni milik Slave setelah dikurangi master, lalu dikali faktor koreksi empiris lapangan
                     const rawSlaveAhDelta = totalAhSystem - masterAhDelta;
                     const slaveAhDelta = rawSlaveAhDelta * SLAVE_CORRECTION_FACTOR;
-                    
+
                     calculatedSlaveAh = lastSlaveAh + slaveAhDelta;
 
                     console.log(`[CORRECTED ENERGY-TO-AH] Net kWh: ${netEnergyKwh.toFixed(4)} | Raw Delta: ${rawSlaveAhDelta.toFixed(2)} | Corrected Delta: ${slaveAhDelta.toFixed(2)}`);
@@ -203,6 +203,7 @@ async function run() {
             timestamp: currentTimestamp,
             deviceSn: deviceSn,
             plantName: plantObj.plantName || "Rumah Kablukan",
+            correctionFactor: SLAVE_CORRECTION_FACTOR,
             system: {
                 totalVoltage,
                 totalCurrent: parseFloat(totalCurrent.toFixed(2)),
