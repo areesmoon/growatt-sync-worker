@@ -174,12 +174,21 @@ async function run() {
                 }
 
                 // 13. Aturan Pengaman (Standby Lock & Cap Protection) berbasis Ah
+                // Ambil data chgCurr langsung dari historyLast (arus masuk/charging dari inverter)
+                const inverterChgCurr = parseFloat(historyLast.chgCurr || 0);
+                const slaveSocCheck = (lastSlaveAh / SLAVE_CAPACITY_AH) * 100;
+
                 if ((masterSoc === 100 || lastSlaveAh >= SLAVE_CAPACITY_AH) && (Math.abs(totalCurrent) <= INV_STANDBY_THRESHOLD || dischgCurr === -INV_STANDBY_THRESHOLD)) {
                     calculatedSlaveAh = SLAVE_CAPACITY_AH;
                     console.log("[STANDBY LOCK] Inverter idle / Standby, Slave Ah dikunci penuh.");
                 } else if (lastSlaveAh >= SLAVE_CAPACITY_AH && slaveCurrent > 0) {
                     calculatedSlaveAh = SLAVE_CAPACITY_AH;
                     console.log("[CAP PROTECTION] Slave penuh & masih charging, Ah dikunci.");
+                } else if (inverterChgCurr === 0 && slaveSocCheck >= 90.0) {
+                    // [AUTO-SYNC OVERRIDE]: Jika inverter sudah berhenti nge-charge (chgCurr == 0) 
+                    // dan SOC Slave sudah tinggi (>= 90%), selaraskan nilai Ah slave dengan master.
+                    calculatedSlaveAh = (masterSoc / 100) * SLAVE_CAPACITY_AH;
+                    console.log(`[AUTO-SYNC FULL] Inverter berhenti nge-charge (chgCurr: ${inverterChgCurr}A) dengan SOC tinggi (${slaveSocCheck.toFixed(1)}%). Ah di-sync selaras dengan Master.`);
                 }
 
                 // Batasi nilai Ah slave di antara 0 sampai kapasitas maksimum nominalnya
@@ -257,7 +266,7 @@ async function run() {
         // Menyimpan dokumen dengan Custom ID yang rapi
         await db.collection(FIRESTORE_COLLECTION).doc(customDocId).set(firestorePayload);
         console.log(`[SUCCESS] Data berhasil disimpan dengan Custom ID: ${customDocId}`);
-        
+
     } catch (error) {
         console.error("Gagal ambil data:", error.message);
     }
