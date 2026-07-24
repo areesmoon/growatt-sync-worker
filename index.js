@@ -28,6 +28,21 @@ const INV_STANDBY_THRESHOLD = parseFloat(process.env.INV_STANDBY_THRESHOLD_AMP |
 const FIRESTORE_COLLECTION = process.env.FIRESTORE_COLLECTION || 'bms_logs';
 let SLAVE_CORRECTION_FACTOR = parseFloat(process.env.SLAVE_CORRECTION_FACTOR || 0.58);
 
+// --- HELPER FORMAT WAKTU WIB ---
+function formatWibTime(isoString) {
+    const date = isoString ? new Date(isoString) : new Date();
+    return date.toLocaleString('id-ID', {
+        timeZone: 'Asia/Jakarta',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    }).replace(/\./g, ':');
+}
+
 async function run() {
     try {
         // Validasi awal keberadaan kredensial
