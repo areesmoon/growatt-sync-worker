@@ -40,10 +40,6 @@ async function run() {
             historyLast: true
         });
 
-        const plantId = Object.keys(plantData)[0];
-        const deviceSn = Object.keys(plantData[plantId].devices)[0];
-        const historyLast = plantData[plantId].devices[deviceSn].historyLast;
-
         console.log(JSON.stringify(plantData, 0, 2));
 
     } catch (error) {
