@@ -4,6 +4,7 @@ const { exec } = require('child_process');
 const path = require('path');
 // Memuat konfigurasi environment dari file .env.local dengan absolute path
 require('dotenv').config({ path: path.join(__dirname, '.env.local') });
+const wa = require('./whatsapp');
 
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
@@ -44,7 +45,7 @@ async function run() {
             deviceData: false,
             weather: false,
             totalData: true,
-            statusData: false,
+            statusData: true,
             historyAll: false
         });
 
@@ -53,10 +54,18 @@ async function run() {
         const plantObj = plantData[plantId] || {};
         const deviceSn = Object.keys(plantObj.devices)[0];
         const deviceNode = plantObj.devices[deviceSn];
+        const statusData = deviceNode.statusData || {};
         const historyLast = deviceNode.historyLast;
         const totalData = deviceNode.totalData || {};
 
-        // 6. Mengambil angka energi kumulatif mentah dari inverter (dalam satuan kWh)
+        // 6.1. gridPower
+        const gridPower = parseFloat(statusData.gridPower || 0);
+        const currentInverterMode = gridPower > 0 ? "UTI" : "SBU";
+
+        // 6.1. gridVoltage
+        const gridVoltage = parseFloat(historyLast.vGrid || 0);
+
+        // 6.3. Mengambil angka energi kumulatif mentah dari inverter (dalam satuan kWh)
         const powerChargeTotal = parseFloat(totalData.chargeTotal || 0);
         const powerDischargeTotal = parseFloat(totalData.eDischargeTotal || 0);
 
@@ -99,8 +108,28 @@ async function run() {
         let lastDischargeTotal = powerDischargeTotal;
         const dischgCurr = parseFloat(historyLast.dischgCurr || 0);
 
+        // [TAMBAHAN]: Variabel buat nyimpen SOC Master sebelumnya
+        let lastMasterSoc = masterSoc;
+
+        // inverter mode
+        let lastInverterMode = currentInverterMode;
+
+        // siapkan gridVoltage
+        let lastGridVoltage = gridVoltage;
+
         if (!lastSnapshot.empty) {
             const lastDoc = lastSnapshot.docs[0].data();
+
+            // Ambil mode dari data sistem sebelumnya (kalau udah pernah disimpan)
+            if (lastDoc.system && lastDoc.system.inverterMode) {
+                lastInverterMode = lastDoc.system.inverterMode;
+            }
+
+            //ambil last grid voltage
+            if (lastDoc.system && lastDoc.system.gridVoltage) {
+                lastGridVoltage = lastDoc.system.gridVoltage;
+            }
+
             const lastTotalVoltage = lastDoc.system ? (lastDoc.system.totalVoltage || rawTotalVoltage) : rawTotalVoltage;
 
             if (lastTotalVoltage > 0 && rawTotalVoltage > 0) {
@@ -110,6 +139,11 @@ async function run() {
             if (lastDoc.system) {
                 lastChargeTotal = lastDoc.system.chargeTotal !== undefined ? lastDoc.system.chargeTotal : powerChargeTotal;
                 lastDischargeTotal = lastDoc.system.dischargeTotal !== undefined ? lastDoc.system.dischargeTotal : powerDischargeTotal;
+            }
+
+            // [TAMBAHAN]: Ambil SOC master dari dokumen sebelumnya
+            if (lastDoc.master && lastDoc.master.soc !== undefined) {
+                lastMasterSoc = lastDoc.master.soc;
             }
         }
 
@@ -244,9 +278,11 @@ async function run() {
                 loadPower,
                 chargeTotal: powerChargeTotal,
                 dischargeTotal: powerDischargeTotal,
-                gridVoltage: parseFloat(historyLast.vGrid || 0),
+                gridVoltage,
                 gridFreq: parseFloat(historyLast.freqGrid || 0),
-                inverterTemp: parseFloat(historyLast.InvTemperature || 0)
+                inverterTemp: parseFloat(historyLast.InvTemperature || 0),
+                gridPower: gridPower,
+                inverterMode: currentInverterMode
             },
             master: {
                 ah: currentMasterAh,
@@ -277,6 +313,65 @@ async function run() {
         if (!existingDocs.empty) {
             console.log(`[SKIP] Data dengan timestamp ${currentTimestamp} sudah ada di Firestore (${FIRESTORE_COLLECTION}).`);
             return;
+        }
+
+        const timeWib = formatWibTime(currentTimestamp);
+
+        // -------------------------------------------------------------
+        // 🚨 WHATSAPP ALERT: Deteksi Perubahan Suplai Beban (PLTS / PLN)
+        // -------------------------------------------------------------
+        if (lastInverterMode !== currentInverterMode) {
+            let modeMessage = "";
+
+            if (currentInverterMode === "SBU") {
+                modeMessage = `🔋 *POWER ALERT*\n\nSuplai beban berpindah ke *PLTS*.\n🕒 Waktu: ${timeWib}`;
+            } else {
+                modeMessage = `⚡ *POWER ALERT*\n\nSuplai beban berpindah ke *PLN*.\n🕒 Waktu: ${timeWib}`;
+            }
+
+            try {
+                await wa.sendMessage(process.env.WA_TARGET_NUMBER, modeMessage);
+                console.log(`📨 Notifikasi WA Perubahan Suplai (${currentInverterMode}) berhasil dikirim!`);
+            } catch (waError) {
+                console.error("❌ Gagal kirim notifikasi WA Suplai:", waError.message);
+            }
+        }
+
+        // -------------------------------------------------------------
+        // 🚨 WHATSAPP ALERT: Deteksi Perubahan Status PLN (Mati / Nyala)
+        // -------------------------------------------------------------
+        const isPlnUpNow = gridVoltage > 150;
+        const isPlnUpBefore = lastGridVoltage > 150;
+
+        if (isPlnUpBefore !== isPlnUpNow) {
+            let plnAlertMessage = "";
+
+            if (!isPlnUpNow) {
+                plnAlertMessage = `🚨 *PLN BLACKOUT ALERT*\n\nJalur PLN padam total! Tegangan Grid drop ke *${gridVoltage}V*. Sistem sepenuhnya mengandalkan backup baterai/solar.\n🕒 Waktu: ${timeWib}`;
+            } else {
+                plnAlertMessage = `⚡ *PLN NORMAL RESTORED*\n\nJalur PLN menyala kembali! Tegangan Grid pulih normal di *${gridVoltage}V*.\n🕒 Waktu: ${timeWib}`;
+            }
+
+            try {
+                await wa.sendMessage(process.env.WA_TARGET_NUMBER, plnAlertMessage);
+                console.log(`📨 Notifikasi WA Status PLN (${isPlnUpNow ? 'Nyala Kembali' : 'Padam'}) berhasil dikirim!`);
+            } catch (waError) {
+                console.error("❌ Gagal kirim notifikasi WA Status PLN:", waError.message);
+            }
+        }
+
+        // -------------------------------------------------------------
+        // 🚨 WHATSAPP ALERT: Deteksi Master SOC 100% Penuh
+        // -------------------------------------------------------------
+        if (lastMasterSoc < 100 && masterSoc === 100) {
+            const alertMessage = `🔋 *BMS MASTER FULL ALERT*\n\nBaterai Master baru saja mencapai 100% penuh!\n⚡ Plant: ${plantObj.plantName || "Rumah Kablukan"}\n🕒 Waktu: ${timeWib}`;
+
+            try {
+                await wa.sendMessage(process.env.WA_TARGET_NUMBER, alertMessage);
+                console.log("📨 Notifikasi WhatsApp Master SOC 100% berhasil dikirim!");
+            } catch (waError) {
+                console.error("❌ Gagal kirim notifikasi WA Master 100%:", waError.message);
+            }
         }
 
         // 16. Menyimpan dokumen payload baru ke Firestore

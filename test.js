@@ -37,7 +37,7 @@ async function run() {
             totalData: false,
             statusData: true,
             historyAll: false,
-            historyLast: false
+            historyLast: true
         });
 
         const plantId = Object.keys(plantData)[0];
