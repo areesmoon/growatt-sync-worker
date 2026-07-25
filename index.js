@@ -104,7 +104,7 @@ async function run() {
         // 8. Mengambil data status baterai Master langsung dari BMS inverter (SOC%)
         const masterSoc = parseFloat(parseFloat(statusData.capacity || 0).toFixed(2));
 
-        const masterCurrent = parseFloat(totalCurrent*(MASTER_CAPACITY_AH/(MASTER_CAPACITY_AH+SLAVE_CAPACITY_AH)) || 0);
+        const masterCurrent = parseFloat((totalCurrent*(MASTER_CAPACITY_AH/(MASTER_CAPACITY_AH+SLAVE_CAPACITY_AH)) || 0).toFixed(2));
 
         // Hitung Ah Master mutlak saat ini berdasarkan perkalian SOC% dengan kapasitas nominalnya
         const currentMasterAh = parseFloat(((masterSoc / 100) * MASTER_CAPACITY_AH).toFixed(2));
@@ -174,7 +174,7 @@ async function run() {
         const masterPower = masterVoltage * masterCurrent;
 
         // 11. Menghitung arus sementara untuk baterai Slave
-        let slaveCurrent = parseFloat(totalCurrent*(SLAVE_CAPACITY_AH/(MASTER_CAPACITY_AH+SLAVE_CAPACITY_AH)) || 0);
+        let slaveCurrent = parseFloat((totalCurrent*(SLAVE_CAPACITY_AH/(MASTER_CAPACITY_AH+SLAVE_CAPACITY_AH)) || 0).toFixed(2));
         if (masterSoc === 100 && dischgCurr === -INV_STANDBY_THRESHOLD) {
             slaveCurrent = 0;
         }
