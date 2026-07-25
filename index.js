@@ -24,7 +24,7 @@ const username = process.env.GROWATT_USERNAME;
 const password = process.env.GROWATT_PASSWORD;
 const MASTER_CAPACITY_AH = parseFloat(process.env.MASTER_CAPACITY_AH || 100);
 const SLAVE_CAPACITY_AH = parseFloat(process.env.SLAVE_CAPACITY_AH || 100);
-const INV_STANDBY_THRESHOLD = parseFloat(process.env.INV_STANDBY_THRESHOLD_AMP || 0.4);
+const INV_STANDBY_THRESHOLD = parseFloat(process.env.INV_STANDBY_THRESHOLD_AMP || -0.4);
 const FIRESTORE_COLLECTION = process.env.FIRESTORE_COLLECTION || 'bms_logs';
 let SLAVE_CORRECTION_FACTOR = parseFloat(process.env.SLAVE_CORRECTION_FACTOR || 0.58);
 
@@ -245,13 +245,13 @@ async function run() {
                 const inverterChgCurr = parseFloat(historyLast.chgCurr || 0);
                 const slaveSocCheck = (lastSlaveAh / SLAVE_CAPACITY_AH) * 100;
 
-                if ((masterSoc === 100 || lastSlaveAh >= SLAVE_CAPACITY_AH) && (Math.abs(totalCurrent) <= INV_STANDBY_THRESHOLD || dischgCurr === -INV_STANDBY_THRESHOLD)) {
+                if ((masterSoc === 100 || lastSlaveAh >= SLAVE_CAPACITY_AH) && (Math.abs(totalCurrent) <= Math.abs(INV_STANDBY_THRESHOLD) || dischgCurr <= Math.abs(INV_STANDBY_THRESHOLD))) {
                     calculatedSlaveAh = SLAVE_CAPACITY_AH;
                     console.log("[STANDBY LOCK] Inverter idle / Standby, Slave Ah dikunci penuh.");
                 } else if (lastSlaveAh >= SLAVE_CAPACITY_AH && slaveCurrent > 0) {
                     calculatedSlaveAh = SLAVE_CAPACITY_AH;
                     console.log("[CAP PROTECTION] Slave penuh & masih charging, Ah dikunci.");
-                } else if (inverterChgCurr === 0 && slaveSocCheck >= 90.0) {
+                } else if (inverterChgCurr === 0 && slaveSocCheck >= 90.0 && (Math.abs(totalCurrent) <= Math.abs(INV_STANDBY_THRESHOLD) || dischgCurr <= Math.abs(INV_STANDBY_THRESHOLD))) {
                     // [AUTO-SYNC OVERRIDE]: Jika inverter sudah berhenti nge-charge (chgCurr == 0) 
                     // dan SOC Slave sudah tinggi (>= 90%), selaraskan nilai Ah slave dengan master.
                     calculatedSlaveAh = (masterSoc / 100) * SLAVE_CAPACITY_AH;
