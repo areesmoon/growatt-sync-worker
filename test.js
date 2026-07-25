@@ -32,12 +32,12 @@ async function run() {
 
         let plantData = await growatt.getAllPlantData({
             plantData: false,
-            deviceData: false,
+            deviceData: true,
             weather: false,
-            totalData: false,
+            totalData: true,
             statusData: true,
             historyAll: false,
-            historyLast: true
+            historyLast: false
         });
 
         console.log(JSON.stringify(plantData, 0, 2));
