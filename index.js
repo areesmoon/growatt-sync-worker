@@ -28,7 +28,7 @@ const INV_STANDBY_THRESHOLD = parseFloat(process.env.INV_STANDBY_THRESHOLD_AMP |
 const FIRESTORE_COLLECTION = process.env.FIRESTORE_COLLECTION || 'bms_logs';
 let SLAVE_CORRECTION_FACTOR = parseFloat(process.env.SLAVE_CORRECTION_FACTOR || 0.58);
 
-const INTERVAL_MINUTES = parseInt(process.env.POLL_INTERVAL_MINUTES || 10, 10);
+const INTERVAL_MINUTES = parseInt(process.env.INTERVAL_MINUTES || 5, 10);
 
 // Inisialisasi instance growatt di luar fungsi agar sesinya bisa di-reuse
 const growatt = new api({});
