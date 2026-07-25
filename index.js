@@ -70,6 +70,7 @@ async function run() {
         const deviceSn = Object.keys(plantObj.devices)[0];
         const deviceNode = plantObj.devices[deviceSn];
         const statusData = deviceNode.statusData || {};
+        const historyLast = deviceNode.historyLast;
         const totalData = deviceNode.totalData || {};
 
         // 6.1. gridPower
@@ -77,15 +78,15 @@ async function run() {
         const currentInverterMode = gridPower > 0 ? "UTI" : "SBU";
 
         // 6.1. gridVoltage
-        const gridVoltage = parseFloat(statusData.vAcInput || 0);
+        const gridVoltage = parseFloat(historyLast.vGrid || 0);
 
         // 6.3. Mengambil angka energi kumulatif mentah dari inverter (dalam satuan kWh)
         const powerChargeTotal = parseFloat(totalData.chargeTotal || 0);
         const powerDischargeTotal = parseFloat(totalData.eDischargeTotal || 0);
 
         // 7. Mengambil data mentah tegangan dan daya baterai dari API untuk presisi maksimal
-        const rawTotalVoltage = parseFloat(statusData.vBat || 0);
-        const totalPower = parseFloat(statusData.batPower || 0) * -1; // pBat dibalik polaritasnya agar sinkron
+        const rawTotalVoltage = parseFloat(historyLast.vBat || 0);
+        const totalPower = parseFloat(historyLast.pBat || 0) * -1; // pBat dibalik polaritasnya agar sinkron
 
         // [PENYESUAIAN PRESISI]: Arus total dihitung langsung dari pBat / vBat
         let totalCurrent = 0;
@@ -96,21 +97,20 @@ async function run() {
         }
 
         // Membaca parameter pendukung lain (beban rumah & produksi panel surya/PPV)
-        const loadPower = parseFloat(statusData.loadPower || 0);
-        const ppv1 = parseFloat(statusData.ppv1 || 0);
-        const ppv2 = parseFloat(statusData.ppv2 || 0);
+        const loadPower = parseFloat(historyLast.outPutPower || 0);
+        const ppv1 = parseFloat(historyLast.ppv1 || 0);
+        const ppv2 = parseFloat(historyLast.ppv2 || 0);
         const totalPpv = parseFloat((ppv1 + ppv2).toFixed(2));
 
         // 8. Mengambil data status baterai Master langsung dari BMS inverter (SOC%)
-        const masterSoc = parseFloat(parseFloat(statusData.capacity || 0).toFixed(2));
-
-        const masterCurrent = parseFloat((totalCurrent*(MASTER_CAPACITY_AH/(MASTER_CAPACITY_AH+SLAVE_CAPACITY_AH)) || 0).toFixed(2));
+        const masterSoc = parseFloat(parseFloat(historyLast.bmsSoc || 0).toFixed(2));
+        const masterCurrent = parseFloat(historyLast.bmsBatteryCurr || 0);
 
         // Hitung Ah Master mutlak saat ini berdasarkan perkalian SOC% dengan kapasitas nominalnya
         const currentMasterAh = parseFloat(((masterSoc / 100) * MASTER_CAPACITY_AH).toFixed(2));
 
         // 9. Menarik log snapshot terakhir dari Firestore (untuk acuan Ah sebelumnya & vBat rata-rata)
-        const currentTimestampStr = new Date().toISOString();
+        const currentTimestampStr = historyLast.calendar || new Date().toISOString();
 
         const lastSnapshot = await db.collection(FIRESTORE_COLLECTION)
             .orderBy('timestamp', 'desc')
@@ -121,7 +121,7 @@ async function run() {
         let totalVoltage = rawTotalVoltage;
         let lastChargeTotal = powerChargeTotal;
         let lastDischargeTotal = powerDischargeTotal;
-        const dischgCurr = parseFloat((totalCurrent < 0 ? -totalCurrent : 0) || 0);
+        const dischgCurr = parseFloat(historyLast.dischgCurr || 0);
 
         // [TAMBAHAN]: Variabel buat nyimpen SOC Master sebelumnya
         let lastMasterSoc = masterSoc;
@@ -170,11 +170,11 @@ async function run() {
             }
         }
 
-        const masterVoltage = parseFloat(totalVoltage);
+        const masterVoltage = parseFloat(historyLast.bmsBatteryVolt || totalVoltage);
         const masterPower = masterVoltage * masterCurrent;
 
         // 11. Menghitung arus sementara untuk baterai Slave
-        let slaveCurrent = parseFloat((totalCurrent*(SLAVE_CAPACITY_AH/(MASTER_CAPACITY_AH+SLAVE_CAPACITY_AH)) || 0).toFixed(2));
+        let slaveCurrent = totalCurrent - masterCurrent;
         if (masterSoc === 100 && dischgCurr === -INV_STANDBY_THRESHOLD) {
             slaveCurrent = 0;
         }
@@ -232,7 +232,8 @@ async function run() {
                 }
 
                 // 13. Aturan Pengaman (Standby Lock & Cap Protection) berbasis Ah
-                const inverterChgCurr = parseFloat(totalCurrent || 0);
+                // Ambil data chgCurr langsung dari historyLast (arus masuk/charging dari inverter)
+                const inverterChgCurr = parseFloat(historyLast.chgCurr || 0);
                 const slaveSocCheck = (lastSlaveAh / SLAVE_CAPACITY_AH) * 100;
 
                 if ((masterSoc === 100 || lastSlaveAh >= SLAVE_CAPACITY_AH) && (Math.abs(totalCurrent) <= INV_STANDBY_THRESHOLD || dischgCurr === -INV_STANDBY_THRESHOLD)) {
@@ -301,8 +302,8 @@ async function run() {
                 chargeTotal: powerChargeTotal,
                 dischargeTotal: powerDischargeTotal,
                 gridVoltage,
-                gridFreq: parseFloat(statusData.fAcInput || 0),
-                inverterTemp: parseFloat(0),
+                gridFreq: parseFloat(historyLast.freqGrid || 0),
+                inverterTemp: parseFloat(historyLast.InvTemperature || 0),
                 gridPower: gridPower,
                 inverterMode: currentInverterMode
             },
@@ -312,10 +313,10 @@ async function run() {
                 voltage: masterVoltage,
                 current: masterCurrent,
                 power: parseFloat(masterPower.toFixed(2)),
-                soh: parseFloat(100),
-                cycleCount: parseInt(0),
-                temperature: parseFloat(0),
-                statusBms: 0
+                soh: parseFloat(historyLast.soh || 0),
+                cycleCount: parseInt(historyLast.cycleCount || 0),
+                temperature: parseFloat(historyLast.bmsBatteryTemp || 0),
+                statusBms: historyLast.bmsStatus || 0
             },
             slave: {
                 ah: slaveAh,

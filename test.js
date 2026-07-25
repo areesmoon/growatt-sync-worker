@@ -37,7 +37,7 @@ async function run() {
             totalData: true,
             statusData: true,
             historyAll: false,
-            historyLast: false
+            historyLast: true
         });
 
         console.log(JSON.stringify(plantData, 0, 2));
