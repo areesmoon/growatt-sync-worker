@@ -28,6 +28,11 @@ const INV_STANDBY_THRESHOLD = parseFloat(process.env.INV_STANDBY_THRESHOLD_AMP |
 const FIRESTORE_COLLECTION = process.env.FIRESTORE_COLLECTION || 'bms_logs';
 let SLAVE_CORRECTION_FACTOR = parseFloat(process.env.SLAVE_CORRECTION_FACTOR || 0.58);
 
+const INTERVAL_MINUTES = parseInt(process.env.POLL_INTERVAL_MINUTES || 10, 10);
+
+// Inisialisasi instance growatt di luar fungsi agar sesinya bisa di-reuse
+const growatt = new api({});
+
 // --- HELPER FORMAT WAKTU WIB ---
 function formatWibTime(isoString) {
     const date = isoString ? new Date(isoString) : new Date();
@@ -50,9 +55,13 @@ async function run() {
             throw new Error("Kredensial Growatt belum diset di file .env.local!");
         }
 
-        // 3. Autentikasi dan login ke API inverter Growatt
-        const growatt = new api({});
-        await growatt.login(username, password);
+        // 3. Cek status sesi & login hanya jika belum terkoneksi
+        if (!growatt.isConnected()) {
+            console.log('Sesi terputus, melakukan login ke API inverter Growatt...');
+            await growatt.login(username, password);
+        } else {
+            console.log('Sesi masih aktif, menggunakan sesi yang ada.');
+        }
 
         // 4. Menarik data plant dengan opsi totalData: true untuk statistik energi kumulatif (kWh)
         let plantData = await growatt.getAllPlantData({
@@ -471,4 +480,15 @@ async function run() {
     }
 }
 
-run();
+function startDaemon() {
+    console.log(`Worker Growatt started. Interval set to ${INTERVAL_MINUTES} minutes.`);
+    
+    // Jalankan sekali di awal saat pertama kali start
+    run();
+
+    // Set interval berulang (konversi menit ke milidetik)
+    setInterval(run, INTERVAL_MINUTES * 60 * 1000);
+}
+
+// Jalankan daemon
+startDaemon();
