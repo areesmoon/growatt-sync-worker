@@ -86,7 +86,7 @@ async function run() {
         const gridPower = parseFloat(statusData.gridPower || 0);
         const currentInverterMode = gridPower > 0 ? "UTI" : "SBU";
 
-        // 6.1. gridVoltage
+        // 6.2. gridVoltage
         const gridVoltage = parseFloat(historyLast.vGrid || 0);
 
         // 6.3. Mengambil angka energi kumulatif mentah dari inverter (dalam satuan kWh)
@@ -142,7 +142,7 @@ async function run() {
         let lastGridVoltage = gridVoltage;
 
         // ppv
-        let lastTotalPpv = totalPpv
+        let lastTotalPpv = totalPpv;
 
         if (!lastSnapshot.empty) {
             const lastDoc = lastSnapshot.docs[0].data();
@@ -182,26 +182,34 @@ async function run() {
         const masterVoltage = parseFloat(historyLast.bmsBatteryVolt || totalVoltage);
         const masterPower = masterVoltage * masterCurrent;
 
-        // 11. Menghitung arus sementara untuk baterai Slave
+        // 11. Menghitung arus sementara untuk baterai Slave (Arus sisa mutlak)
         let slaveCurrent = totalCurrent - masterCurrent;
         if (masterSoc === 100 && dischgCurr === -INV_STANDBY_THRESHOLD) {
             slaveCurrent = 0;
         }
 
-        // Inisialisasi nilai Ah awal slave
+        // Inisialisasi variabel tracking & faktor koreksi (Default awal 1.0, counter mulai dari 1)
         let slaveAh = (masterSoc / 100) * SLAVE_CAPACITY_AH;
         let slaveSoc = masterSoc;
+        let chargeCorrectionFactor = 1.0;
+        let dischargeCorrectionFactor = 1.0;
+        let totalCount = 1;
 
-        // 12. Logika Utama Kalkulasi Berbasis Ah Murni (ENERGY-TO-AH INTEGRATION ONLY)
+        // 12. Logika Utama Kalkulasi Arus dan Faktor Koreksi
         if (!lastSnapshot.empty) {
             const lastDoc = lastSnapshot.docs[0].data();
 
-            SLAVE_CORRECTION_FACTOR = parseFloat(lastDoc.correctionFactor || SLAVE_CORRECTION_FACTOR);
+            // Ambil data calibration sebelumnya dengan aman (antisipasi dokumen lama)
+            if (lastDoc.calibration && typeof lastDoc.calibration === 'object') {
+                chargeCorrectionFactor = parseFloat(lastDoc.calibration.chargeCorrectionFactor ?? 1.0);
+                dischargeCorrectionFactor = parseFloat(lastDoc.calibration.dischargeCorrectionFactor ?? 1.0);
+                totalCount = parseInt(lastDoc.calibration.totalCount ?? 1, 10);
+            } else {
+                console.log("[INFO] Map 'calibration' belum ada di dokumen Firestore sebelumnya. Menggunakan nilai default awal.");
+            }
 
-            // Ambil data Ah Master & Slave sebelumnya dari Firestore
-            const lastMasterAh = lastDoc.master && lastDoc.master.ah !== undefined
-                ? lastDoc.master.ah
-                : currentMasterAh;
+            // Increment counter total data pencatatan
+            totalCount += 1;
 
             const lastSlaveAh = lastDoc.slave && lastDoc.slave.ah !== undefined
                 ? lastDoc.slave.ah
@@ -213,35 +221,22 @@ async function run() {
                 slaveSoc = 100.0;
                 console.log("[CALIBRATION] Master SOC 100%. Slave Ah & SOC di-reset otomatis penuh ke 100%.");
             } else {
-                // Hitung delta energi kumulatif (kWh) dari inverter
-                const deltaChargeKwh = powerChargeTotal - lastChargeTotal;
-                const deltaDischargeKwh = powerDischargeTotal - lastDischargeTotal;
-                const netEnergyKwh = deltaChargeKwh - deltaDischargeKwh;
+                // Asumsi interval waktu (dt) dalam jam untuk integrasi Ah (misal 5 menit = 5 / 60 jam)
+                const hoursDelta = INTERVAL_MINUTES / 60.0;
 
-                let calculatedSlaveAh = lastSlaveAh;
+                // Hitung delta Ah dari arus sisa slave (Ampere * Jam = Ah)
+                let rawSlaveAhDelta = slaveCurrent * hoursDelta;
 
-                if (totalVoltage > 0 && (deltaChargeKwh !== 0 || deltaDischargeKwh !== 0)) {
-                    // Konversi kWh netto ke Total Ah sistem secara mutlak
-                    const totalAhSystem = (netEnergyKwh * 1000) / totalVoltage;
-
-                    // Hitung delta Ah yang terpakai/masuk di Master
-                    const masterAhDelta = currentMasterAh - lastMasterAh;
-
-                    // Sisa delta Ah murni milik Slave setelah dikurangi master, lalu dikali faktor koreksi empiris lapangan
-                    const rawSlaveAhDelta = totalAhSystem - masterAhDelta;
-                    const slaveAhDelta = rawSlaveAhDelta * SLAVE_CORRECTION_FACTOR;
-
-                    calculatedSlaveAh = lastSlaveAh + slaveAhDelta;
-
-                    console.log(`[CORRECTED ENERGY-TO-AH] Net kWh: ${netEnergyKwh.toFixed(4)} | Raw Delta: ${rawSlaveAhDelta.toFixed(2)} | Corrected Delta: ${slaveAhDelta.toFixed(2)}`);
-                } else {
-                    // JIKA KWH KUMULATIF MANDEK (DELTA 0): Slave mutlak diam/statis ngikutin nilai terakhirnya!
-                    calculatedSlaveAh = lastSlaveAh;
-                    console.log(`[STATIC] kWh Kumulatif Mandek (Delta 0). Slave Ah dipertahankan statis di: ${lastSlaveAh}Ah`);
+                // Terapkan faktor koreksi terpisah pada delta Ah Slave berdasarkan arah arusnya
+                if (slaveCurrent > 0) {
+                    rawSlaveAhDelta *= chargeCorrectionFactor;
+                } else if (slaveCurrent < 0) {
+                    rawSlaveAhDelta *= dischargeCorrectionFactor;
                 }
 
-                // 13. Aturan Pengaman (Standby Lock & Cap Protection) berbasis Ah
-                // Ambil data chgCurr langsung dari historyLast (arus masuk/charging dari inverter)
+                let calculatedSlaveAh = lastSlaveAh + rawSlaveAhDelta;
+
+                // 13. Aturan Pengaman (Standby Lock & Cap Protection)
                 const inverterChgCurr = parseFloat(historyLast.chgCurr || 0);
                 const slaveSocCheck = (lastSlaveAh / SLAVE_CAPACITY_AH) * 100;
 
@@ -252,16 +247,13 @@ async function run() {
                     calculatedSlaveAh = SLAVE_CAPACITY_AH;
                     console.log("[CAP PROTECTION] Slave penuh & masih charging, Ah dikunci.");
                 } else if (inverterChgCurr === 0 && slaveSocCheck >= 90.0 && (Math.abs(totalCurrent) <= Math.abs(INV_STANDBY_THRESHOLD) || dischgCurr <= Math.abs(INV_STANDBY_THRESHOLD))) {
-                    // [AUTO-SYNC OVERRIDE]: Jika inverter sudah berhenti nge-charge (chgCurr == 0) 
-                    // dan SOC Slave sudah tinggi (>= 90%), selaraskan nilai Ah slave dengan master.
                     calculatedSlaveAh = (masterSoc / 100) * SLAVE_CAPACITY_AH;
-                    console.log(`[AUTO-SYNC FULL] Inverter berhenti nge-charge (chgCurr: ${inverterChgCurr}A) dengan SOC tinggi (${slaveSocCheck.toFixed(1)}%). Ah di-sync selaras dengan Master.`);
+                    console.log(`[AUTO-SYNC FULL] Inverter berhenti nge-charge dengan SOC tinggi. Ah di-sync selaras dengan Master.`);
                 }
 
-                // [AUTO-TRIGGER CORRECT.JS]: Jika sebelumnya di bawah kapasitas, 
-                // tapi hasil kalkulasi baru ini tembus kapasitas maksimal, panggil correct.js otomatis!
+                // Auto-trigger correct.js
                 if (lastSlaveAh < SLAVE_CAPACITY_AH && calculatedSlaveAh >= SLAVE_CAPACITY_AH) {
-                    console.log(`\n🚨 [AUTO-CORRECT TRIGGER] Slave tembus batas penuh (${calculatedSlaveAh.toFixed(2)}Ah). Menjalankan correct.js otomatis...`);
+                    console.log(`\n🚨 [AUTO-CORRECT TRIGGER] Slave tembus batas penuh. Menjalankan correct.js otomatis...`);
 
                     const scriptPath = path.join(__dirname, 'correct.js');
                     const command = `node "${scriptPath}" --slave_ah=${SLAVE_CAPACITY_AH}`;
@@ -271,19 +263,12 @@ async function run() {
                             console.error(`❌ Gagal menjalankan correct.js otomatis: ${error.message}`);
                             return;
                         }
-                        if (stderr) {
-                            console.error(`⚠️ Warning dari correct.js: ${stderr}`);
-                        }
+                        if (stderr) console.error(`⚠️ Warning dari correct.js: ${stderr}`);
                         console.log(`✅ Sukses Eksekusi Otomatis:\n${stdout}`);
                     });
                 }
 
                 slaveAh = parseFloat(Math.min(SLAVE_CAPACITY_AH, Math.max(0, calculatedSlaveAh)).toFixed(2));
-
-                // Batasi nilai Ah slave di antara 0 sampai kapasitas maksimum nominalnya
-                slaveAh = parseFloat(Math.min(SLAVE_CAPACITY_AH, Math.max(0, calculatedSlaveAh)).toFixed(2));
-
-                // Turunkan persentase SOC untuk display dashboard
                 slaveSoc = parseFloat(((slaveAh / SLAVE_CAPACITY_AH) * 100).toFixed(2));
                 console.log(`[RESULT] Slave Ah: ${slaveAh}Ah / ${SLAVE_CAPACITY_AH}Ah | Slave SOC: ${slaveSoc}%`);
             }
@@ -294,14 +279,13 @@ async function run() {
         const slaveVoltage = totalVoltage;
         const slavePower = slaveVoltage * slaveCurrent;
 
-        // 14. Menyusun struktur payload data matang dengan menyertakan nilai Ah dan SOC% untuk display
+        // 14. Menyusun struktur payload dengan Map 'calibration' yang bersih dan fungsional
         const currentTimestamp = new Date(currentTimestampStr).toISOString();
 
         const firestorePayload = {
             timestamp: currentTimestamp,
             deviceSn: deviceSn,
             plantName: plantObj.plantName || "Rumah Kablukan",
-            correctionFactor: SLAVE_CORRECTION_FACTOR,
             system: {
                 totalVoltage,
                 totalCurrent: parseFloat(totalCurrent.toFixed(2)),
@@ -333,6 +317,11 @@ async function run() {
                 voltage: slaveVoltage,
                 current: parseFloat(slaveCurrent.toFixed(2)),
                 power: parseFloat(slavePower.toFixed(2))
+            },
+            calibration: {
+                chargeCorrectionFactor: parseFloat(chargeCorrectionFactor.toFixed(4)),
+                dischargeCorrectionFactor: parseFloat(dischargeCorrectionFactor.toFixed(4)),
+                totalCount: totalCount
             }
         };
 
@@ -416,10 +405,8 @@ async function run() {
             let solarAlertMessage = "";
 
             if (!isSolarProducingNow) {
-                // Dari ada produksi (> 0) menjadi 0 (Habis/Malam)
                 solarAlertMessage = `🌙 *SOLAR PRODUCTION STOPPED*\n\nProduksi panel surya berhenti / habis. Sistem beralih sepenuhnya ke Baterai/PLN.\n🕒 Waktu: ${timeWib}`;
             } else {
-                // Dari 0 menjadi mulai berproduksi (> 0)
                 solarAlertMessage = `☀️ *SOLAR PRODUCTION STARTED*\n\nPanel surya mulai berproduksi! Daya terdeteksi *${totalPpv}W*.\n🕒 Waktu: ${timeWib}`;
             }
 
@@ -464,14 +451,11 @@ async function run() {
             }
         }
 
-        // 16. Menyimpan dokumen payload baru ke Firestore
-        // Format timestamp jadi string aman untuk Firestore Document ID
-        // Contoh: "2026-07-24T03:31:17.000Z" diubah jadi "2026-07-24_03-31-17"
+        // 16. Menyimpan dokumen payload baru ke Firestore dengan Custom ID rapi
         const customDocId = currentTimestamp
-            .replace(/[:.]/g, '-')  // ganti titik dan titik dua jadi dash (-)
-            .replace('T', '_');     // ganti T jadi underscore (_)
+            .replace(/[:.]/g, '-')  
+            .replace('T', '_');     
 
-        // Menyimpan dokumen dengan Custom ID yang rapi
         await db.collection(FIRESTORE_COLLECTION).doc(customDocId).set(firestorePayload);
         console.log(`[SUCCESS] Data berhasil disimpan dengan Custom ID: ${customDocId}`);
 
@@ -482,7 +466,7 @@ async function run() {
 
 function startDaemon() {
     console.log(`Worker Growatt started. Interval set to ${INTERVAL_MINUTES} minutes.`);
-    
+
     // Jalankan sekali di awal saat pertama kali start
     run();
 
